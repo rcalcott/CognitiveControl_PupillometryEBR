@@ -18,7 +18,7 @@ numPracBlocks <- 3 # practice blocks are removed from analyses
 excludeOther <- 617 # study 1b
 # excludeOther <- c(708,714) # study 1c
 
-# excludeErrorsPercent <- .15 #threshold for excluding subjects due to poor accuracy (only use if want to set threshold other than 3SDs)
+excludeErrorsPercent <- .15 #threshold for excluding subjects due to poor accuracy (only use if want to set threshold other than 3SDs)
 
 ###############
 
@@ -46,9 +46,10 @@ detach(package:plyr)
 Errors <- dplyr::group_by(allData, ID) %>%
   summarise(errors=mean(Error, na.rm=TRUE))
 
-excludeErrors <- Errors$ID[Errors$errors>excludeErrorsPercent]
+# excludeErrors <- Errors$ID[Errors$errors>excludeErrorsPercent]
+#meanErrorCalc <- filter(Errors, !(ID %in% c(excludeErrors)) & !(ID %in% c(excludeOther)))
 
-meanErrorCalc <- filter(Errors, !(ID %in% c(excludeErrors)) & !(ID %in% c(excludeOther)))
+meanErrorCalc <- filter(Errors, !(ID %in% c(excludeOther)))
 meanErrors <- mean(meanErrorCalc$errors)
 sdErrors <- sd(meanErrorCalc$errors)
 
@@ -72,7 +73,7 @@ cleanData_behAnalyses <- filter(allData,
 
 
 save(cleanData_behAnalyses, file=paste(outputPath, 'cleanDataBehAnalyses.Rda', sep='')) 
-save(cleanData_behAnalyses_eRate, file=paste(outputPath, 'cleanDataBehAnalyses_eRate.Rda', sep='')) 
+#save(cleanData_behAnalyses_eRate, file=paste(outputPath, 'cleanDataBehAnalyses_eRate.Rda', sep='')) 
 
 
 
