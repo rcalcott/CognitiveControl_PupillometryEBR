@@ -20,7 +20,7 @@ load(paste(outputPath, 'cleanDataBehAnalyses.Rda', sep=''))
 
 
 #### RT Analyses - Trial-by-Trial RTs ####
-cleanData <- filter(cleanData_behAnalyses, Error==0)
+cleanData <- filter(cleanData_behAnalyses, Error==0, Blocktype>2)
 
 # Create cue variable
 cleanData$Cue <- NA
@@ -37,6 +37,7 @@ findOutliers$excludeMin <- findOutliers$meanRT - excludeRTmaxSDs*findOutliers$sd
 cleanData <- merge(cleanData, findOutliers, by='ID', sort=FALSE)
 cleanData$outlierMax <- cleanData$exclude-cleanData$RT
 cleanData$outlierMin <- cleanData$excludeMin-cleanData$RT
+
 
 cleanData$switchSet <- factor(cleanData$switchSet,
                               levels=c(0,1),
@@ -99,12 +100,13 @@ s + coord_cartesian(ylim=c(650,950))
 
 #### Mean RT Analyses - By Condition ####
 
-summaryStats <- group_by(cleanData_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsMeanRT <- group_by(cleanData_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(meanRT = mean(RT, na.rm=TRUE))
+summaryStatsMeanRT <- na.omit(summaryStatsMeanRT, cols='Cue')
 
 model0.3 <- lmer(meanRT ~ 1 +
                    (1|ID),
-                 data=summaryStats,
+                 data=summaryStatsMeanRT,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.3))
@@ -115,27 +117,34 @@ icc <- L2var/(L2var+L1var)
 
 model3 <- lmer(meanRT ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStats,
+               data=summaryStatsMeanRT,
                na.action=na.exclude)
 
+#are results the same with a LM?
+model3.0.1 <- lm(meanRT ~ Cue*switchSet*Congruent*Blocktype,
+                  data=summaryStatsMeanRT,
+                  na.action=na.exclude)
+
 #### Median and RTCV Analyses - By Condition ####
-summaryStats <- group_by(cleanData, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsAllRTs <- group_by(cleanData, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(medianRT = median(RT, na.rm=TRUE),
             meanRT = mean(RT, na.rm = TRUE),
             sdRT = sd(RT, na.rm=TRUE))
+summaryStatsAllRTs <- na.omit(summaryStatsAllRTs, cols='Cue')
+
 
 # Compute RT CV
-summaryStats$RTCV <-  summaryStats$sdRT/summaryStats$meanRT
+summaryStatsAllRTs$RTCV <-  summaryStatsAllRTs$sdRT/summaryStatsAllRTs$meanRT
 
 
 model0.4 <- lmer(medianRT ~ 1 +
                    (1|ID),
-                 data=summaryStats,
+                 data=summaryStatsAllRTs,
                  na.action=na.exclude)
 
 model0.5 <- lmer(RTCV ~ 1 +
                    (1|ID),
-                 data=summaryStats,
+                 data=summaryStatsAllRTs,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.5))
@@ -147,16 +156,50 @@ icc <- L2var/(L2var+L1var)
 
 model4 <- lmer(medianRT ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStats,
+               data=summaryStatsAllRTs,
                na.action=na.exclude)
 
+# winsorize to 3SDs 
+meanMedian <- mean(summaryStatsAllRTs$medianRT)
+sdMedian <- sd(summaryStatsAllRTs$medianRT)
+maxMedian <- meanMedian + 3*sdMedian
+minMedian <- meanMedian - 3*sdMedian
+findNextLargestMedian <- filter(summaryStatsAllRTs, medianRT<maxMedian)
+maxValueMedian <- max(findNextLargestMedian$medianRT)
+summaryStatsAllRTsCleanMed <- summaryStatsAllRTs
+summaryStatsAllRTsCleanMed$medianRT[summaryStatsAllRTsCleanMed$medianRT>maxMedian] <- maxValueMedian
+
+# run model with outliers removed
+model4.0 <- lmer(medianRT ~ Cue*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=summaryStatsAllRTsCleanMed,
+               na.action=na.exclude)
+
+
+# look at RTCV
 model5 <- lmer(RTCV ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStats,
+               data=summaryStatsAllRTs,
+               na.action=na.exclude)
+
+# winsorize to 3SDs 
+meanRTCV <- mean(summaryStatsAllRTs$RTCV)
+sdRTCV <- sd(summaryStatsAllRTs$RTCV)
+maxRTCV <- meanRTCV + 3*sdRTCV
+minRTCV <- meanRTCV - 3*sdRTCV
+findNextLargestRTCV <- filter(summaryStatsAllRTs, RTCV<maxRTCV)
+maxValueRTCV <- max(findNextLargestRTCV$RTCV)
+summaryStatsAllRTsCleanRTCV <- summaryStatsAllRTs
+summaryStatsAllRTsCleanRTCV$RTCV[summaryStatsAllRTsCleanRTCV$RTCV>maxRTCV] <- maxValueRTCV
+
+model5.0 <- lmer(RTCV ~ Cue*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=summaryStatsAllRTsCleanRTCV,
                na.action=na.exclude)
 
 
-eff1 <- effect('Cue:switchSet:Blocktype', model5)
+
+eff1 <- effect('Cue:switchSet:Blocktype', model5.0)
 x1 <- as.data.frame(eff1)
 x1$Cue <- relevel(x1$Cue,'Uncued')
 
@@ -178,7 +221,7 @@ s + coord_cartesian(ylim=c(650,950))
 s + coord_cartesian(ylim=c(0.2,0.3))
 
 
-eff1 <- effect('Cue:switchSet:Congruent:Blocktype', model5)
+eff1 <- effect('Cue:switchSet:Congruent:Blocktype', model5.0)
 x1 <- as.data.frame(eff1)
 x1$Cue <- relevel(x1$Cue,'Uncued')
 
@@ -202,7 +245,7 @@ s + coord_cartesian(ylim=c(0.2,0.3))
 #### Error Rate By-Condition Analyses ####
 # Looks at error rates, mean RT, median RT, and RT variability
 
-cleanDataErrors <- cleanData_behAnalyses
+cleanDataErrors <- filter(cleanData_behAnalyses, Blocktype>2)
 
 # Create cue variable
 cleanDataErrors$Cue <- NA
@@ -229,14 +272,15 @@ cleanDataErrors$Blocktype <- factor(cleanDataErrors$Blocktype,
 cleanDataErrors$ID <- factor(cleanDataErrors$ID)
 
 
-summaryStats <- group_by(cleanDataErrors, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsErrors <- group_by(cleanDataErrors, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(eRate = mean(Error, na.rm=TRUE))
+summaryStatsErrors <- na.omit(summaryStatsErrors, cols='Cue')
 
 
 # Null models
 model0.1 <- lmer(eRate ~ 1 +
                    (1|ID),
-                 data=summaryStats,
+                 data=summaryStatsErrors,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.1))
@@ -247,10 +291,24 @@ icc <- L2var/(L2var+L1var)
 
 model2 <- lmer(eRate ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStats,
+               data=summaryStatsErrors,
                na.action=na.exclude)
 
+# winsorize to 3SDs 
+meanErate <- mean(summaryStatsErrors$eRate)
+sdErate <- sd(summaryStatsErrors$eRate)
+maxErate <- meanErate + 3*sdErate
+minErate <- meanErate - 3*sdErate
+findNextLargestErate <- filter(summaryStatsErrors, eRate<maxErate)
+maxValueErate <- max(findNextLargestErate$eRate)
+summaryStatsErrorsClean <- summaryStatsErrors
+summaryStatsErrorsClean$eRate[summaryStatsErrorsClean$eRate>maxErate] <- maxValueErate
 
+
+model2.0 <- lmer(eRate ~ Cue*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=summaryStatsErrorsClean,
+               na.action=na.exclude)
 
 #### Check to see if same analyses on first half of data are the same as full dataset ####
 
@@ -273,7 +331,7 @@ load(paste(outputPath, 'cleanDataBehAnalyses.Rda', sep=''))
 
 
 #### RT Analyses - Trial-by-Trial RTs ####
-cleanDataFirstHalf <- filter(cleanData_behAnalyses, Error==0, Block<=10)
+cleanDataFirstHalf <- filter(cleanData_behAnalyses, Error==0, Block<=10, Blocktype>2)
 
 # Create cue variable
 cleanDataFirstHalf$Cue <- NA
@@ -352,12 +410,12 @@ s + coord_cartesian(ylim=c(650,950))
 
 #### Mean RT Analyses - By Condition ####
 
-summaryStatsFirstHalf <- group_by(cleanDataFirstHalf_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsFirstHalfMeanRT <- group_by(cleanDataFirstHalf_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(meanRT = mean(RT, na.rm=TRUE))
 
 model0.3 <- lmer(meanRT ~ 1 +
                    (1|ID),
-                 data=summaryStatsFirstHalf,
+                 data=summaryStatsFirstHalfMeanRT,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.3))
@@ -368,27 +426,27 @@ icc <- L2var/(L2var+L1var)
 
 model3.1 <- lmer(meanRT ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStatsFirstHalf,
+               data=summaryStatsFirstHalfMeanRT,
                na.action=na.exclude)
 
 #### Median and RTCV Analyses - By Condition ####
-summaryStatsFirstHalf <- group_by(cleanDataFirstHalf, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsFirstHalfAllRTs <- group_by(cleanDataFirstHalf, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(medianRT = median(RT, na.rm=TRUE),
             meanRT = mean(RT, na.rm = TRUE),
             sdRT = sd(RT, na.rm=TRUE))
 
 # Compute RT CV
-summaryStatsFirstHalf$RTCV <-  summaryStatsFirstHalf$sdRT/summaryStatsFirstHalf$meanRT
+summaryStatsFirstHalfAllRTs$RTCV <-  summaryStatsFirstHalfAllRTs$sdRT/summaryStatsFirstHalfAllRTs$meanRT
 
 
 model0.4 <- lmer(medianRT ~ 1 +
                    (1|ID),
-                 data=summaryStatsFirstHalf,
+                 data=summaryStatsFirstHalfAllRTs,
                  na.action=na.exclude)
 
 model0.5 <- lmer(RTCV ~ 1 +
                    (1|ID),
-                 data=summaryStatsFirstHalf,
+                 data=summaryStatsFirstHalfAllRTs,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.5))
@@ -400,12 +458,12 @@ icc <- L2var/(L2var+L1var)
 
 model4.1 <- lmer(medianRT ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStatsFirstHalf,
+               data=summaryStatsFirstHalfAllRTs,
                na.action=na.exclude)
 
 model5.1 <- lmer(RTCV ~ Cue*switchSet*Congruent*Blocktype + 
                  (1|ID),
-               data=summaryStatsFirstHalf,
+               data=summaryStatsFirstHalfAllRTs,
                na.action=na.exclude)
 
 
@@ -455,7 +513,7 @@ s + coord_cartesian(ylim=c(0.2,0.3))
 #### Error Rate By-Condition Analyses ####
 # Looks at error rates, mean RT, median RT, and RT variability
 
-cleanDataFirstHalfErrors <- filter(cleanData_behAnalyses, Block<=10)
+cleanDataFirstHalfErrors <- filter(cleanData_behAnalyses, Block<=10, Blocktype>2)
 
 # Create cue variable
 cleanDataFirstHalfErrors$Cue <- NA
@@ -525,7 +583,7 @@ load(paste(outputPath, 'cleanDataBehAnalyses.Rda', sep=''))
 
 
 #### RT Analyses - Trial-by-Trial RTs ####
-cleanDataSecondHalf <- filter(cleanData_behAnalyses, Error==0, Block>=10)
+cleanDataSecondHalf <- filter(cleanData_behAnalyses, Error==0, Block>=10, Blocktype>2)
 
 # Create cue variable
 cleanDataSecondHalf$Cue <- NA
@@ -604,12 +662,12 @@ s + coord_cartesian(ylim=c(650,950))
 
 #### Mean RT Analyses - By Condition ####
 
-summaryStatsSecondHalf <- group_by(cleanDataSecondHalf_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsSecondHalfMeanRT <- group_by(cleanDataSecondHalf_outliersRemoved, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(meanRT = mean(RT, na.rm=TRUE))
 
 model0.3 <- lmer(meanRT ~ 1 +
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfMeanRT,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.3))
@@ -620,27 +678,27 @@ icc <- L2var/(L2var+L1var)
 
 model3.2 <- lmer(meanRT ~ Cue*switchSet*Congruent*Blocktype + 
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfMeanRT,
                  na.action=na.exclude)
 
 #### Median and RTCV Analyses - By Condition ####
-summaryStatsSecondHalf <- group_by(cleanDataSecondHalf, ID, Cue, switchSet, Congruent, Blocktype) %>%
+summaryStatsSecondHalfAllRTs <- group_by(cleanDataSecondHalf, ID, Cue, switchSet, Congruent, Blocktype) %>%
   summarise(medianRT = median(RT, na.rm=TRUE),
             meanRT = mean(RT, na.rm = TRUE),
             sdRT = sd(RT, na.rm=TRUE))
 
 # Compute RT CV
-summaryStatsSecondHalf$RTCV <-  summaryStatsSecondHalf$sdRT/summaryStatsSecondHalf$meanRT
+summaryStatsSecondHalfAllRTs$RTCV <-  summaryStatsSecondHalfAllRTs$sdRT/summaryStatsSecondHalfAllRTs$meanRT
 
 
 model0.4 <- lmer(medianRT ~ 1 +
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfAllRTs,
                  na.action=na.exclude)
 
 model0.5 <- lmer(RTCV ~ 1 +
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfAllRTs,
                  na.action=na.exclude)
 
 varcom <- as.data.frame(VarCorr(model0.5))
@@ -652,12 +710,12 @@ icc <- L2var/(L2var+L1var)
 
 model4.2 <- lmer(medianRT ~ Cue*switchSet*Congruent*Blocktype + 
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfAllRTs,
                  na.action=na.exclude)
 
 model5.2 <- lmer(RTCV ~ Cue*switchSet*Congruent*Blocktype + 
                    (1|ID),
-                 data=summaryStatsSecondHalf,
+                 data=summaryStatsSecondHalfAllRTs,
                  na.action=na.exclude)
 
 
@@ -707,7 +765,7 @@ s + coord_cartesian(ylim=c(0.2,0.3))
 #### Error Rate By-Condition Analyses ####
 # Looks at error rates, mean RT, median RT, and RT variability
 
-cleanDataSecondHalfErrors <- filter(cleanData_behAnalyses, Block>=10)
+cleanDataSecondHalfErrors <- filter(cleanData_behAnalyses, Block>=10, Blocktype>2)
 
 # Create cue variable
 cleanDataSecondHalfErrors$Cue <- NA

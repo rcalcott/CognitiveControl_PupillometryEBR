@@ -1,0 +1,86 @@
+---
+title: "NMCC Behavioral and Eyetracking Results"
+output: html_document
+params:
+  data: 'Study1b'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# must adjust this to file location
+dataPath <- paste('~/Dropbox/Studies/Dissertation/output/', params$data, '/', sep='') 
+
+library(itrackR)
+library(edfR)
+library(dplyr)
+library(dtplyr)
+library(ggplot2)
+library(lme4)
+library(haven)
+library(lmerTest)
+library(effects)
+library(psych)
+
+excludeRTmax <- 2000
+excludeRTmin <- 100
+excludeRTmaxSDs <- 3
+
+load(paste(dataPath, 'cleanDataBehAnalyses.Rda', sep='')) 
+load(paste(dataPath, 'eyetrackingData_byTrial.Rda', sep='')) 
+
+# Center continuous predictor variables 
+cleanData_behAnalyses$Trial_Ctr <- cleanData_behAnalyses$Trial - 2.5
+cleanData_behAnalyses$Block_Ctr <- (cleanData_behAnalyses$Block - 4) - 6.5
+
+
+```
+All analyses use linear mixed models with fixed slopes and random intercepts.
+
+# Behavioral Analyses
+
+## Reaction Time (RT)
+RTs were transformed using the natural log to reduce skewness. Outliers greater than 3SDs from each participant's mean RT for each condition, as well as RTs > 2000ms or <100ms
+
+```{r RT data cleaning include=FALSE }
+# Data cleaning for RT analyses: 
+# Remove error trials, Non-Switch blocks, first sets of blocks, and trials 5 and 6.
+cleanData <- filter(cleanData_behAnalyses, Error==0, Blocktype>2, Set>1, Trial<5)
+
+# log transform RTs and find outliers
+cleanData$lnRT <- log(cleanData$RT)
+findOutliers <- group_by(cleanData, ID, Trial, switchSet, Congruent, Blocktype) %>%
+  summarise(meanlnRT=mean(lnRT, na.rm=TRUE),
+            sdlnRT=sd(lnRT, na.rm=TRUE))
+findOutliers$exclude <- findOutliers$meanlnRT + excludeRTmaxSDs*findOutliers$sdlnRT
+findOutliers$excludeMin <- findOutliers$meanlnRT - excludeRTmaxSDs*findOutliers$sdlnRT
+cleanData <- merge(cleanData, findOutliers, by='ID', sort=FALSE)
+cleanData$outlierMax <- cleanData$exclude-cleanData$lnRT
+cleanData$outlierMin <- cleanData$excludeMin-cleanData$lnRT
+
+# create factors
+cleanData$switchSet <- factor(cleanData$switchSet,
+                              levels=c(0,1),
+                              labels=c('Non-Switch Set','Switch Set'))
+
+cleanData$Congruent <- factor(cleanData$Congruent,
+                              levels=c(1,2),
+                              labels=c('Congruent','Incongruent'))
+
+cleanData$Blocktype <- factor(cleanData$Blocktype,
+                              levels=c(3,4),
+                              labels=c('Pure Updating','Perseveration-Inhibition'))
+cleanData$ID <- factor(cleanData$ID)
+
+# remove outliers
+cleanData_outliersRemoved <- filter(cleanData, 
+                                    RT>=excludeRTmin & RT<=excludeRTmax & outlierMax>0 & outlierMin<0)
+```
+
+### Null Model
+
+```{r null model RT, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
