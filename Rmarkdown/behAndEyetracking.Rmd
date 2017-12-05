@@ -1,0 +1,1145 @@
+---
+title: "NMCC Behavioral and Eyetracking Results"
+output: html_document
+params:
+  data: 'Study1b'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# must adjust this to file location
+dataPath <- paste('~/Dropbox/Studies/Dissertation/output/', params$data, '/', sep='') 
+
+library(itrackR)
+library(edfR)
+library(dplyr)
+library(dtplyr)
+library(ggplot2)
+library(lme4)
+library(haven)
+library(lmerTest)
+library(effects)
+library(psych)
+library(knitr)
+library(sjPlot)
+
+excludeRTmax <- 2000
+excludeRTmin <- 100
+excludeRTmaxSDs <- 3
+excludeSaccLatency <- 750
+targetHitThresh <- .75 # below this threshold, exclude subjects for not fixating the target on enough trials.
+
+
+load(paste(dataPath, 'cleanDataBehAnalyses.Rda', sep='')) 
+load(paste(dataPath, 'eyetrackingData_byTrial.Rda', sep='')) 
+
+# Center continuous predictor variables 
+cleanData_behAnalyses$Trial_Ctr <- cleanData_behAnalyses$Trial - 2.5
+
+# Note - because PU and PI blocks alternated, they were paired for centering (i.e. first PI and first PU block both coded as Block 1)
+cleanData_behAnalyses$Block_Ctr <- (floor((cleanData_behAnalyses$Block-5)/2)) - 2.5
+
+allEyes <- merge(allEyes, cleanData_behAnalyses, by=c('ID','Block','Set','Trial'))
+
+
+
+```
+All analyses use linear mixed models with fixed slopes and random intercepts.
+
+# Behavioral Analyses
+
+## Reaction Time (RT) Analyses
+RTs were transformed using the natural log to reduce skewness. Outliers greater than 3SDs from each participant's mean RT for each condition, as well as RTs > 2000ms or < 100ms.
+
+```{r data prep for RT analyses, include=FALSE }
+
+# Data cleaning for RT analyses: 
+# Remove error trials, Non-Switch blocks, first sets of blocks, and trials 5 and 6.
+cleanData <- filter(cleanData_behAnalyses, Error==0, Blocktype>2, Set>1, Trial<5)
+
+# log transform RTs and find outliers
+cleanData$lnRT <- log(cleanData$RT)
+findOutliers <- group_by(cleanData, ID, Trial, switchSet, Congruent, Blocktype) %>%
+  summarise(meanlnRT=mean(lnRT, na.rm=TRUE),
+            sdlnRT=sd(lnRT, na.rm=TRUE))
+findOutliers$exclude <- findOutliers$meanlnRT + excludeRTmaxSDs*findOutliers$sdlnRT
+findOutliers$excludeMin <- findOutliers$meanlnRT - excludeRTmaxSDs*findOutliers$sdlnRT
+cleanData <- merge(cleanData, findOutliers, by=c('ID', 'Trial','switchSet','Congruent','Blocktype'), sort=FALSE)
+cleanData$outlierMax <- cleanData$exclude-cleanData$lnRT
+cleanData$outlierMin <- cleanData$excludeMin-cleanData$lnRT
+
+# create factors
+cleanData$switchSet <- factor(cleanData$switchSet,
+                              levels=c(0,1),
+                              labels=c('Non-Switch Set','Switch Set'))
+
+cleanData$Congruent <- factor(cleanData$Congruent,
+                              levels=c(1,2),
+                              labels=c('Congruent','Incongruent'))
+
+cleanData$Blocktype <- factor(cleanData$Blocktype,
+                              levels=c(3,4),
+                              labels=c('Pure Updating','Perseveration-Inhibition'))
+cleanData$ID <- factor(cleanData$ID)
+
+# remove outliers
+cleanData_outliersRemoved <- filter(cleanData, 
+                                    RT>=excludeRTmin & RT<=excludeRTmax & outlierMax>0 & outlierMin<0)
+```
+
+```{r initial models RT, include=FALSE}
+model0.1 <- lmer(lnRT ~ 1 +
+                 (1|ID),
+               data=cleanData_outliersRemoved,
+               na.action=na.exclude)
+
+varcom <- as.data.frame(VarCorr(model0.1))
+L2var <- varcom$vcov[1]
+L1var <- varcom$vcov[2]
+icc0.1 <- L2var/(L2var+L1var)
+
+# prediction model:
+model1 <- lmer(lnRT ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=cleanData_outliersRemoved,
+               na.action=na.exclude)
+```
+
+### Prediction Model 1: Effect of Trial, Switch Set, Congruence, and Block Type on RT
+
+ICC = `r icc0.1`
+
+``` {r table1, echo=FALSE}
+sjt.lmer(model1, pred.labels=c('Trial','Switch Set','Congruence','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+Lower-level effects were largely as expected. RTs were slower on earlier trials in a set, Switch sets, and Perseveration-Inhibition blocks. They were also marginally slower on Incongruent trials.  The 2-way interaction between Trial and Set Type indicates that RTs were slower on earlier trials on sets in which subjects have recently switched (i.e. the switch cost). There was also a 2-way interaction between Set Type and Block Type, which will be interpreted in light of a 3-way interaction (below)
+
+The key higher-level interaction was the 3-way interaction between Trial, Switch Set, and Block Type. As shown in the figure below, RTs on Switch Sets decline more steeply over the course of a set during Pure Updating blocks compared to Perseveration-Inhibition blocks.
+
+```{r figure1, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:switchSet:Blocktype', model1)
+x1 <- as.data.frame(eff1)
+e <- exp(1)
+x1$fitRT <- e^(x1$fit)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fitRT, shape=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fitRT, linetype=switchSet)) +
+  facet_grid(Blocktype~.) +
+  scale_linetype_discrete(name='switchSet', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='RT')
+p
+```
+
+In the process of trying to understand these behavioral effects, it became clear that there were time on task effects. That is, the effects differed in the first vs. second half of the data. So, we added Block as a continuous predictor to explicitly determine the effect of time on task performance.
+
+### Prediction Model 2: Effect of Trial, Switch Set, Congruence, Block Type, and Block (i.e. time on task) on RT
+```{r prediction model for RT with block, include=FALSE}
+
+model2 <- lmer(lnRT ~ Trial_Ctr*Block_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=cleanData_outliersRemoved,
+               na.action=na.exclude)
+
+```
+
+``` {r table2, echo=FALSE}
+sjt.lmer(model2, pred.labels=c('Trial','Block','Switch Set','Congruence','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+Examination of the AIC values suggests that this latter model that includes Block is a better fit for the data:
+```{r AIC table, echo=FALSE}
+AIC(model1,model2)
+```
+
+Here, the lower-level effects were consistent with Model 1. There was no main effect of Block on RT. Additionally, the key 3-way interaction between Trial, Switch Set, and Block Type was not moderated by time on task. However, there were some higher-level interactions with Block.
+
+1. There was a marginally significant (p=.06) 4-way interaction between Trial, Block, Congruence, and Block Type. On Pure Updating blocks, there is a general trend for participants to become more distractible over the course of a set (increasing Incongruence Costs). On Perseveration-Inhibition blocks, on the other hand, there is a trend for participants to become less distractible over the course of a set; however this effect strongest during earlier blocks. It is worth noting that in Model 1, the 3-way interaction between Trial, Congruence, and Block Type approached significance (p=.11).
+
+```{r figure2, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:Block_Ctr:Congruent:Blocktype', model2)
+x1 <- as.data.frame(eff1)
+e <- exp(1)
+x1$fitRT <- e^(x1$fit)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+x1$Block_Ctr <- x1$Block_Ctr+3.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fitRT, shape=Congruent))+
+  geom_line(aes(x=Trial_Ctr, y=fitRT, linetype=Congruent)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  scale_linetype_discrete(name='Congruence', labels=c('Congruent','Incongruent')) +
+  labs(x='Trial', y='RT')
+p
+```
+
+2. There was additionally a significant 5-way interaction between Trial, Block, Switch Set, Congruence, and Block Type. 
+
+```{r figure3, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:Block_Ctr:switchSet:Congruent:Blocktype', model2)
+x1 <- as.data.frame(eff1)
+e <- exp(1)
+x1$fitRT <- e^(x1$fit)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+x1$Block_Ctr <- x1$Block_Ctr+3.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fitRT, shape=Congruent, color=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fitRT, linetype=Congruent, color=switchSet)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  scale_linetype_discrete(name='Congruence', labels=c('Congruent','Incongruent')) +
+  labs(x='Trial', y='RT')
+p
+```
+
+Overall, this finding suggests that the observed 3-way interaction (Trial x Switch Set x Block Type) is modulated by both Block and Congruence. 
+
+On Non-Switch Sets:
+- On Perseveration-Inhibition blocks at the beginning of the experiment, incongruence costs become smaller over the course of a set. At the end of the experiment, incongruence costs become larger over the course of a set.
+- On Pure Updating blocks at the beginning of the experiment, incongruence costs become larger over the course of a set, but this trend becomes smaller at the end of the experiment.
+
+On Switch Sets:
+- On Perseveration-Inhibition blocks at the beginning of the experiment, there are no (or negative) incongruence costs on Switch trials, whereas at the end of the experiment, there are incongruence costs on Switch trials (which become smaller over the course of the set)
+- On Pure Updating blocks at the beginning of the experiment, there is a (small) incongruence cost on Switch trials, which becomes smaller over the course of the set. At the end of the experiment, there are negative incongruence costs on switch trials, which become larger over the course of the set.
+
+Taken together: 
+Typically, we might expect that there would be larger incongruence costs on switch trials, because the need to update one's attentional set means that there is less shielding against distractors. However, this appears to happen only on Perseveration-Inhibition blocks at the end of the experiment, and perhaps to a smaller degree on Pure Updating blocks at the beginning of the experiment. Additionally, we might expect that more time with a particular attentional set would result in smaller incongruence costs (on non-switch sets). However, this appears to only happen on early blocks in the Perseveration-Inhibition condition.
+
+Does this interaction provide any insight about the different mental processes involved in performance of Perseveration-Inhibition vs. Pure Updating blocks?
+- It is possible that the Perseveration-Inhibition blocks evoke greater top-down/proactive control, because more is required to ignore distraction? This would be reflected in smaller switch costs (if they are using the cue to prepare for the upcoming trial) and also smaller incongruence costs, because they would be less distracted and also show less of an enhancement on congruent trials. This is somewhat consistent with the results for Perseveration-Inhibition blocks at the beginning of the experiment. 
+
+Are Block effects related to fatigue or practice?
+- These higher-order effects will need to be replicated in independent datasets. Of particular interest might be Study 1c, in which participants completed the same number of trials, but in about half the time. Block effects that replicate in that sample are more likely to be caused by practice effects, whereas those that do not are more likely to be attributable to fatigue.
+
+It is also possible that other measures of behavioral performance can say something about what is happening here...
+
+## Error Rate Analyses
+```{r data prep for Error Rate analyses, include=FALSE}
+# Data cleaning for error rate analyses
+# Remove non-switch blocks, first sets, and trials 5 & 6.
+cleanDataErrors <- filter(cleanData_behAnalyses, Blocktype>2, Set>1, Trial<5)
+
+# create factors
+cleanDataErrors$switchSet <- factor(cleanDataErrors$switchSet,
+                                    levels=c(0,1),
+                                    labels=c('Non-Switch Set','Switch Set'))
+
+cleanDataErrors$Congruent <- factor(cleanDataErrors$Congruent,
+                                    levels=c(1,2),
+                                    labels=c('Congruent','Incongruent'))
+
+cleanDataErrors$Blocktype <- factor(cleanDataErrors$Blocktype,
+                                    levels=c(3,4),
+                                    labels=c('Pure Updating','Perseveration-Inhibition'))
+cleanDataErrors$ID <- factor(cleanDataErrors$ID)
+
+# find mean RT for each condition
+summaryStatsErrors <- group_by(cleanDataErrors, ID, Trial_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(eRate = mean(Error, na.rm=TRUE))
+
+
+# winsorize to 3SDs 
+meanErate <- mean(summaryStatsErrors$eRate)
+sdErate <- sd(summaryStatsErrors$eRate)
+maxErate <- meanErate + 3*sdErate
+minErate <- meanErate - 3*sdErate
+findNextLargestErate <- filter(summaryStatsErrors, eRate<maxErate)
+maxValueErate <- max(findNextLargestErate$eRate)
+summaryStatsErrorsClean <- summaryStatsErrors
+summaryStatsErrorsClean$eRate[summaryStatsErrorsClean$eRate>maxErate] <- maxValueErate
+
+```
+
+```{r initial models error rate, include=FALSE}
+model0.2 <- lmer(eRate ~ 1 +
+                   (1|ID),
+                 data=summaryStatsErrors,
+                 na.action=na.exclude)
+
+varcom <- as.data.frame(VarCorr(model0.2))
+L2var <- varcom$vcov[1]
+L1var <- varcom$vcov[2]
+icc0.2 <- L2var/(L2var+L1var)
+
+model3 <- lmer(eRate ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                   (1|ID),
+                 data=summaryStatsErrorsClean,
+                 na.action=na.exclude)
+```
+### Prediction Model 3: Effect of Trial, Switch Set, Congruence, and Block Type on Error Rate
+
+ICC = `r icc0.2`
+``` {r table3, echo=FALSE}
+sjt.lmer(model3, pred.labels=c('Trial','Switch Set','Congruence','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+Participants made more errors on Switch Sets, Incongruent trials, and also on Switch trials (Trial x Switch Set interaction).
+
+The 3-way interaction between Trial, Switch Set, and Block Type (observed for RTs) was marginally significant here (p=.06). On Switch Sets, participants made more errors immediately following the switch, compared to Non-Switch Sets. On Switch Sets in Pure Updating blocks, the error rate declined more steeply over the course of the set compared to Perseveration-Inhibition blocks. This finding suggests that the RT effect is not caused by a speed accuracy tradeoff.
+
+```{r figure4, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Trial_Ctr:switchSet:Blocktype', model3)
+x1 <- as.data.frame(eff1)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fit, linetype=switchSet)) +
+  facet_grid(Blocktype~.) +
+  scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='Error Rate')
+p
+
+```
+
+Additionally, there was a marginally significant 3-way interaction between Trial, Switch Set, and Congruence (p=.054). This interaction is similar to the one found for Block Type -  On Congruent trials, this difference became smaller over the course of the set, whereas it remained constant for Incongruent trials.
+
+```{r figure5, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Trial_Ctr:switchSet:Congruent', model3)
+x1 <- as.data.frame(eff1)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fit, linetype=switchSet)) +
+  facet_grid(Congruent~.) +
+  scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='Error Rate')
+p
+
+```
+
+Finally, there was a significant 3-way interaction between Switch Set, Congruence, and Block Type. Participants made more errors on Incongruent trials, and this was especially pronounced for Incongruent trials in Switch Sets on Perseveration-Inhibition blocks. 
+```{r figure6, echo=FALSE, message=FALSE}
+
+eff1 <- effect('switchSet:Congruent:Blocktype', model3)
+x1 <- as.data.frame(eff1)
+
+limits = aes(ymax = fit + (se), ymin=fit - (se))
+dodge = position_dodge(width=0.9)
+
+s=ggplot(x1, aes(x = switchSet, y = fit, fill = Congruent))+
+  facet_grid(Blocktype~.) +
+  geom_bar(stat='identity', position=dodge)+
+  geom_errorbar(limits, position=dodge, width=0.25)+
+  scale_fill_manual(values=c('orangered3','dodgerblue4'),
+                    name="Congruence",
+                    breaks=c("Congruent", "Incongruent"),
+                    labels=c("Congruent", "Incongruent")) +
+  ylab('RT (ms)')+
+  xlab('Set Type')
+s
+```
+
+### Prediction Model 4: Effect of Trial, Switch Set, Congruence, Block Type, and Block on Error Rate
+Given the time on task effects observed in the previous experiment, we additionally looked at whether these effects were moderated by time on task.
+
+```{r prediction model for Error Rate with block}
+# find mean RT for each condition
+summaryStatsErrors <- group_by(cleanDataErrors, ID, Trial_Ctr, switchSet, Congruent, Blocktype, Block_Ctr) %>%
+  summarise(eRate = mean(Error, na.rm=TRUE))
+
+
+# winsorize to 3SDs 
+meanErate <- mean(summaryStatsErrors$eRate)
+sdErate <- sd(summaryStatsErrors$eRate)
+maxErate <- meanErate + 3*sdErate
+minErate <- meanErate - 3*sdErate
+findNextLargestErate <- filter(summaryStatsErrors, eRate<maxErate)
+maxValueErate <- max(findNextLargestErate$eRate)
+summaryStatsErrorsClean <- summaryStatsErrors
+summaryStatsErrorsClean$eRate[summaryStatsErrorsClean$eRate>maxErate] <- maxValueErate
+
+model4 <- lmer(eRate ~ Trial_Ctr*Block_Ctr*switchSet*Congruent*Blocktype + 
+                   (1|ID),
+                 data=summaryStatsErrorsClean,
+                 na.action=na.exclude)
+```
+
+```{r table4, echo=FALSE}
+sjt.lmer(model4, pred.labels=c('Trial','Block','Switch Set','Congruence','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+In this model, the effects were largely the same as for the model without Block included. There were main effects of Congruence, Switch Set, and also a Switch effect (Trial x Switch Set interaction). The 3-way interactions were also the same, although the interaction between Trial, Switch Set, and Block Type was further from reaching significance (p=.12). There was a marginally significant 4-way interaction between Block, Switch Set, Congruence, and Block Type (p=.88), suggesting that the high error rate on Incongruent trials on Perseveration-Inhibition Switch Sets is strongest on earlier blocks.
+
+```{r figure6 with Block, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Block_Ctr:switchSet:Congruent:Blocktype', model4)
+x1 <- as.data.frame(eff1)
+x1$Block_Ctr <- x1$Block_Ctr+3.5
+
+
+limits = aes(ymax = fit + (se), ymin=fit - (se))
+dodge = position_dodge(width=0.9)
+
+s=ggplot(x1, aes(x = switchSet, y = fit, fill = Congruent))+
+  facet_grid(Blocktype~Block_Ctr) +
+  geom_bar(stat='identity', position=dodge)+
+  geom_errorbar(limits, position=dodge, width=0.25)+
+  scale_fill_manual(values=c('orangered3','dodgerblue4'),
+                    name="Congruence",
+                    breaks=c("Congruent", "Incongruent"),
+                    labels=c("Congruent", "Incongruent")) +
+  ylab('RT (ms)')+
+  xlab('Set Type')
+s
+```
+
+
+## RT CV Analyses
+Finally, we examined how variability in RT differed across the experimental conditions. 
+
+```{r data prep for RTCV analyses, include=FALSE}
+
+summaryStatsAllRTs <- group_by(cleanData, ID, Trial_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(medianRT = median(RT, na.rm=TRUE),
+            meanRT = mean(RT, na.rm = TRUE),
+            sdRT = sd(RT, na.rm=TRUE))
+summaryStatsAllRTs$RTCV <-  summaryStatsAllRTs$sdRT/summaryStatsAllRTs$meanRT
+
+# winsorize to 3SDs
+meanRTCV <- mean(summaryStatsAllRTs$RTCV, na.rm=TRUE)
+sdRTCV <- sd(summaryStatsAllRTs$RTCV, na.rm=TRUE)
+maxRTCV <- meanRTCV + 3*sdRTCV
+minRTCV <- meanRTCV - 3*sdRTCV
+findNextLargestRTCV <- filter(summaryStatsAllRTs, RTCV<maxRTCV)
+maxValueRTCV <- max(findNextLargestRTCV$RTCV)
+summaryStatsAllRTsCleanRTCV <- summaryStatsAllRTs
+summaryStatsAllRTsCleanRTCV$RTCV[summaryStatsAllRTsCleanRTCV$RTCV>maxRTCV] <- maxValueRTCV
+
+```
+
+### Prediction Model 5: Effect of Trial, Switch Set, Congruence, and Block Type on RTCV
+``` {r initial models RTCV, include=FALSE}
+model0.3 <- lmer(RTCV ~ 1 +
+                   (1|ID),
+                 data=summaryStatsAllRTsCleanRTCV,
+                 na.action=na.exclude)
+
+varcom <- as.data.frame(VarCorr(model0.3))
+L2var <- varcom$vcov[1]
+L1var <- varcom$vcov[2]
+icc0.3 <- L2var/(L2var+L1var)
+
+model5 <- lmer(RTCV ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                   (1|ID),
+                 data=summaryStatsAllRTsCleanRTCV,
+                 na.action=na.exclude)
+
+```
+ICC = `r icc0.3`
+```{r table5, echo=FALSE}
+sjt.lmer(model5, pred.labels=c('Trial','Switch Set','Congruence','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+RTs were more variable on Switch Sets and on Perseveration-Inhibition blocks. There were no other significant main or interaction effects. Given the effects of Block on RTs, we also tested a model that included Block.
+
+### Prediction Model 6: The effect of Trial, Switch Set, Congruence, Block Type, and Block on RTCV
+```{r prediction model for RTCV with block, include=FALSE}
+summaryStatsAllRTs <- group_by(cleanData, ID, Trial_Ctr, Block_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(medianRT = median(RT, na.rm=TRUE),
+            meanRT = mean(RT, na.rm = TRUE),
+            sdRT = sd(RT, na.rm=TRUE))
+summaryStatsAllRTs$RTCV <-  summaryStatsAllRTs$sdRT/summaryStatsAllRTs$meanRT
+
+# winsorize to 3SDs
+meanRTCV <- mean(summaryStatsAllRTs$RTCV, na.rm=TRUE)
+sdRTCV <- sd(summaryStatsAllRTs$RTCV, na.rm=TRUE)
+maxRTCV <- meanRTCV + 3*sdRTCV
+minRTCV <- meanRTCV - 3*sdRTCV
+findNextLargestRTCV <- filter(summaryStatsAllRTs, RTCV<maxRTCV)
+maxValueRTCV <- max(findNextLargestRTCV$RTCV)
+summaryStatsAllRTsCleanRTCV <- summaryStatsAllRTs
+summaryStatsAllRTsCleanRTCV$RTCV[summaryStatsAllRTsCleanRTCV$RTCV>maxRTCV] <- maxValueRTCV
+
+model6 <- lmer(RTCV ~ Trial_Ctr*Block_Ctr*switchSet*Congruent*Blocktype + 
+                   (1|ID),
+                 data=summaryStatsAllRTsCleanRTCV,
+                 na.action=na.omit)
+```
+
+```{r table6, echo=FALSE}
+sjt.lmer(model6, pred.labels=c('Trial','Block','Switch Set','Congruent','Block Type'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+```
+
+Including Block in the model changed the results substantially. The main effect of Switch Set was consistent; however the main effect of block type was no longer significant (p=.39). There was additionally a trend towards greater variability on later blocks (p=.071).
+
+There were additionally a series of nested interactions - First, there was an interaction between Trial, Block, and Block Type. At the beginning of the experiment, RT variability stayed the same over the course of the set on Perseveration-Inhibition blocks and became smaller over the course of the set on Pure Updating blocks (driven by smaller variability at end of P-U blocks). At the end of the experiment, RT variability stayed the same over sets on Pure Updating blocks, but became smaller on Perseveration-Inhibition blocks (driven by larger variability at beginning of P-I sets)
+```{r figure 7, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:Block_Ctr:Blocktype', model6)
+x1 <- as.data.frame(eff1)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+x1$Block_Ctr <- x1$Block_Ctr + 3.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit))+
+  geom_line(aes(x=Trial_Ctr, y=fit)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='RTCV')
+p
+```
+
+There was additionally a 4-way interaction between Trial, Block, Congruence, and Block Type. Here, it appears that the greatest changes in slope across sets are driven by Congruent, rather than Incongruent trials, on both Block Types.
+```{r figure 8, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:Block_Ctr:Congruent:Blocktype', model6)
+x1 <- as.data.frame(eff1)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+x1$Block_Ctr <- x1$Block_Ctr + 3.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=Congruent))+
+  geom_line(aes(x=Trial_Ctr, y=fit, linetype=Congruent)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='RTCV')
+p
+```
+
+Finally, there was a 5-way interaction between Trial, Block, Switch Set, Congruence, and Block Type.
+```{r figure 9, echo=FALSE, message=FALSE}
+eff1 <- effect('Trial_Ctr:Block_Ctr:switchSet:Congruent:Blocktype', model6)
+x1 <- as.data.frame(eff1)
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+x1$Block_Ctr <- x1$Block_Ctr + 3.5
+
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=Congruent, color=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fit, linetype=Congruent, color=switchSet)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='RTCV')
+p
+```
+
+Can these RT variability effects help with interpretation of RT findings?
+
+It will be important to determine whether this effect replicates in the other samples. 
+
+# Eyetracking Analyses
+```{r data prep for eyetracking analyses, include=FALSE}
+
+allEyesClean <- filter(allEyes, Set>1, Trial<5)
+
+# calculate rate of fixating on target, to be able to exclude people with too few target fixations.
+getTargetHits <- group_by(allEyesClean, ID) %>%
+  summarise(targetHitRate=mean(firstTarFix_tar, na.rm=TRUE))
+
+excludeTarFixes <- getTargetHits$ID[getTargetHits$targetHitRate<targetHitThresh]
+
+allEyesClean <- filter(allEyesClean, !(ID %in% c(excludeTarFixes)))
+
+N=length(unique(allEyesClean$ID))
+
+```
+Participants who fixated on the target on fewer than 75% of trials were excluded from analyses. This decision was made in order to include only those participants who were reliably making saccades to the target, and exclude those who may have been using an alternative strategy (i.e. covert attention).
+
+N=`r N`
+
+## How does the probability of fixating the target (and distractors) change over the course of the experiment?
+```{r data prep target fix probability, include=FALSE}
+
+summaryStatsBySet <- group_by(allEyesClean, ID, Block_Ctr) %>%
+  summarise(targetProb=mean(firstTarFix_tar, na.rm=TRUE),
+          distractorProb=mean(firstDistFix_dist, na.rm=TRUE),
+          neutralProb=mean(firstNeutFix_neut, na.rm=TRUE))
+
+meanTarProb <- mean(summaryStatsBySet$targetProb, na.rm=TRUE)
+sdTarProb <- sd(summaryStatsBySet$targetProb, na.rm=TRUE)
+maxTarProb <- meanTarProb + 3*sdTarProb
+minTarProb <- meanTarProb - 3*sdTarProb
+findNextLargestTarProb <- filter(summaryStatsBySet, targetProb<maxTarProb)
+maxValueTarProb <- max(findNextLargestTarProb$targetProb)
+findNextSmallestTarProb <- filter(summaryStatsBySet, targetProb>minTarProb)
+minValueTarProb <- min(findNextSmallestTarProb$targetProb)
+summaryStatsBySet$targetProb[summaryStatsBySet$targetProb>maxTarProb] <- maxValueTarProb
+summaryStatsBySet$targetProb[summaryStatsBySet$targetProb<minTarProb] <- minValueTarProb
+
+meanDistProb <- mean(summaryStatsBySet$distractorProb, na.rm=TRUE)
+sdDistProb <- sd(summaryStatsBySet$distractorProb, na.rm=TRUE)
+maxDistProb <- meanDistProb + 3*sdDistProb
+minDistProb <- meanDistProb - 3*sdDistProb
+findNextLargestDistProb <- filter(summaryStatsBySet, distractorProb<maxDistProb)
+maxValueDistProb <- max(findNextLargestDistProb$distractorProb)
+findNextSmallestDistProb <- filter(summaryStatsBySet, distractorProb>minDistProb)
+minValueDistProb <- min(findNextSmallestDistProb$distractorProb)
+summaryStatsBySet$distractorProb[summaryStatsBySet$distractorProb>maxDistProb] <- maxValueDistProb
+summaryStatsBySet$distractorProb[summaryStatsBySet$distractorProb<minDistProb] <- minValueDistProb
+
+meanNeutProb <- mean(summaryStatsBySet$neutralProb, na.rm=TRUE)
+sdNeutProb <- sd(summaryStatsBySet$neutralProb, na.rm=TRUE)
+maxNeutProb <- meanNeutProb + 3*sdNeutProb
+minNeutProb <- meanNeutProb - 3*sdNeutProb
+findNextLargestNeutProb <- filter(summaryStatsBySet, neutralProb<maxNeutProb)
+maxValueNeutProb <- max(findNextLargestNeutProb$neutralProb)
+findNextSmallestNeutProb <- filter(summaryStatsBySet, neutralProb>minNeutProb)
+minValueNeutProb <- min(findNextSmallestNeutProb$neutralProb)
+summaryStatsBySet$neutralProb[summaryStatsBySet$neutralProb>maxNeutProb] <- maxValueNeutProb
+summaryStatsBySet$neutralProb[summaryStatsBySet$neutralProb<minNeutProb] <- minValueNeutProb
+
+
+model0 <- lmer(targetProb ~ 1 +
+                 (1|ID),
+               data=summaryStatsBySet,
+               na.action=na.exclude)
+
+varcom <- as.data.frame(VarCorr(model0))
+L2var <- varcom$vcov[1]
+L1var <- varcom$vcov[2]
+icc.04 <- L2var/(L2var+L1var)
+
+model7 <- lmer(targetProb ~ Block_Ctr +
+                 (1|ID),
+               data=summaryStatsBySet,
+               na.action=na.exclude)
+
+model8 <- lmer(distractorProb ~ Block_Ctr +
+                 (1|ID),
+               data=summaryStatsBySet,
+               na.action=na.exclude)
+
+model9 <- lmer(neutralProb ~ Block_Ctr +
+                 (1|ID),
+               data=summaryStatsBySet,
+               na.action=na.exclude)
+
+```
+
+```{r table 7, echo=FALSE, message=FALSE}
+
+sjt.lmer(model7, model8, model9, pred.labels=c('Block'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+In this sample (which included only those who fixated on the target 75% of the time), there was no change in the likelihood of fixating the target, distractor, or neutral object over the course of the experimental session. 
+
+## How does probability of fixating the target relate to performance?
+### RTs
+Error Trials were excluded from this analysis.
+```{r model10, include=FALSE}
+
+# remove errors prior to RT analyses
+allEyesCleanNoErrors <- filter(allEyesClean, Error==0)
+
+# log transform RTs and exclude outliers.
+allEyesCleanNoErrors$lnRT <- log(allEyesCleanNoErrors$RT)
+findOutliers <- group_by(allEyesCleanNoErrors, ID) %>%
+  summarise(meanlnRT=mean(lnRT, na.rm=TRUE),
+            sdlnRT=sd(lnRT, na.rm=TRUE))
+findOutliers$exclude <- findOutliers$meanlnRT + excludeRTmaxSDs*findOutliers$sdlnRT
+findOutliers$excludeMin <- findOutliers$meanlnRT - excludeRTmaxSDs*findOutliers$sdlnRT
+allEyesCleanNoErrors <- merge(allEyesCleanNoErrors, findOutliers, by='ID', sort=FALSE)
+allEyesCleanNoErrors$outlierMax <- allEyesCleanNoErrors$exclude-allEyesCleanNoErrors$lnRT
+allEyesCleanNoErrors$outlierMin <- allEyesCleanNoErrors$excludeMin-allEyesCleanNoErrors$lnRT
+
+allEyesCleanNoErrors_outliersRemoved <- filter(allEyesCleanNoErrors, 
+                                    RT>=excludeRTmin & RT<=excludeRTmax & outlierMax>0 & outlierMin<0)
+
+tarProb <- group_by(allEyesClean_outliersRemoved, ID, Block_Ctr) %>%
+  summarise(targetProb=mean(firstTarFix_tar, na.rm=TRUE),
+            meanRT=mean(lnRT, na.rm=TRUE))
+
+# winsorize target probability
+meanTarProb <- mean(tarProb$targetProb, na.rm=TRUE)
+sdTarProb <- sd(tarProb$targetProb, na.rm=TRUE)
+maxTarProb <- meanTarProb + 3*sdTarProb
+minTarProb <- meanTarProb - 3*sdTarProb
+findNextLargestTarProb <- filter(tarProb, targetProb<maxTarProb)
+maxValueTarProb <- max(findNextLargestTarProb$targetProb)
+findNextSmallestTarProb <- filter(tarProb, targetProb>minTarProb)
+minValueTarProb <- min(findNextSmallestTarProb$targetProb)
+tarProb$targetProb[tarProb$targetProb>maxTarProb] <- maxValueTarProb
+tarProb$targetProb[tarProb$targetProb<minTarProb] <- minValueTarProb
+
+
+model10 <- lmer(meanRT ~ targetProb*Block_Ctr +
+                 (1|ID),
+               data=tarProb,
+               na.action=na.exclude)
+
+
+```
+
+```{r table 7, echo=FALSE, message=FALSE}
+
+sjt.lmer(model10, pred.labels=c('Block'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+
+There was no significant relationship between target fixation probability and RT, nor did this interact with time on task.
+
+### Error Rates
+```{r model11, include=FALSE}
+
+summaryStatsBySetErrors <- group_by(allEyesClean, ID, Block_Ctr) %>%
+  summarise(eRate=mean(Error, na.rm=TRUE),
+            targetProb=mean(firstTarFix_tar, na.rm=TRUE))
+
+# winsorize error rate to 3SDs 
+meanErate <- mean(summaryStatsBySetErrors$eRate)
+sdErate <- sd(summaryStatsBySetErrors$eRate)
+maxErate <- meanErate + 3*sdErate
+minErate <- meanErate - 3*sdErate
+findNextLargestErate <- filter(summaryStatsBySetErrors, eRate<maxErate)
+maxValueErate <- max(findNextLargestErate$eRate)
+summaryStatsBySetErrors$eRate[summaryStatsBySetErrors$eRate>maxErate] <- maxValueErate
+
+# winsorize target probability
+meanTarProb <- mean(summaryStatsBySetErrors$targetProb, na.rm=TRUE)
+sdTarProb <- sd(summaryStatsBySetErrors$targetProb, na.rm=TRUE)
+maxTarProb <- meanTarProb + 3*sdTarProb
+minTarProb <- meanTarProb - 3*sdTarProb
+findNextLargestTarProb <- filter(summaryStatsBySetErrors, targetProb<maxTarProb)
+maxValueTarProb <- max(findNextLargestTarProb$targetProb)
+findNextSmallestTarProb <- filter(summaryStatsBySetErrors, targetProb>minTarProb)
+minValueTarProb <- min(findNextSmallestTarProb$targetProb)
+summaryStatsBySetErrors$targetProb[summaryStatsBySetErrors$targetProb>maxTarProb] <- maxValueTarProb
+summaryStatsBySetErrors$targetProb[summaryStatsBySetErrors$targetProb<minTarProb] <- minValueTarProb
+
+
+model11 <- lmer(eRate ~ targetProb*Block_Ctr +
+                 (1|ID),
+               data=summaryStatsBySetErrors,
+               na.action=na.exclude)
+
+```
+
+```{r table 8, echo=FALSE, message=FALSE}
+
+sjt.lmer(model11, pred.labels=c('Block'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+On the other hand, higher target fixation probability was significantly associated with error rate. Lower target fixation probability was associated with more errors. Also, participants made more errors on earlier, compared to later blocks. Finally, there was a 2-way interaction between target Probability and Block: The negative relationship between target fixation rate and errors became weaker over the course of the experiment.
+
+```{r figure10, echo=FALSE, message=FALSE}
+
+eff1 <- effect('targetProb:Block_Ctr', model11)
+x1 <- as.data.frame(eff1)
+x1$Block_Ctr <- x1$Block_Ctr + 3.5
+
+
+p=ggplot(x1, aes(x=targetProb, y=fit))+
+  geom_line(aes(x=targetProb, y=fit)) +
+  facet_grid(.~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Target Fixation Probability', y='Error Rate')
+p
+```
+
+## How do eyetracking DVs differ across task conditions 
+### Time to first saccade on the target (correct trials only):
+Here, we are looking at how task condition (and time on task in Model 13) affect the time of the participant's first saccade to the target.
+```{r model12, include=FALSE}
+
+allEyesNoErrors <- filter(allEyesClean, Error==0)
+
+allEyesNoErrors$switchSet <- factor(allEyesNoErrors$switchSet,
+                            levels=c(0,1),
+                            labels=c('Non-Switch Set','Switch Set'))
+
+allEyesNoErrors$Congruent <- factor(allEyesNoErrors$Congruent,
+                            levels=c(1,2),
+                            labels=c('Congruent','Incongruent'))
+
+allEyesNoErrors$Blocktype <- factor(allEyesNoErrors$Blocktype,
+                            levels=c(3,4),
+                            labels=c('Pure Updating','Perseveration-Inhibition'))
+allEyesNoErrors$ID <- factor(allEyesNoErrors$ID)
+
+
+# remove outlying onset times (>3SDs)
+meanOnsetTime <- mean(allEyesNoErrors$firstTarSacc_relOnsetTime, na.rm=TRUE)
+sdOnsetTime <- sd(allEyesNoErrors$firstTarSacc_relOnsetTime, na.rm=TRUE)
+maxOnsetTime <- meanOnsetTime + 3*sdOnsetTime
+minOnsetTime <- meanOnsetTime - 3*sdOnsetTime
+
+allEyesNoErrors_outliersRemoved <- filter(allEyesNoErrors, 
+                                    firstTarSacc_relOnsetTime>minOnsetTime & firstTarSacc_relOnsetTime<maxOnsetTime)
+
+model0 <- lmer(firstSacc_relOnsetTime ~ 1 +
+                 (1|ID),
+               data=allEyesNoErrors_outliersRemoved,
+               na.action=na.exclude)
+
+varcom <- as.data.frame(VarCorr(model0))
+L2var <- varcom$vcov[1]
+L1var <- varcom$vcov[2]
+icc <- L2var/(L2var+L1var)
+
+model12 <- lmer(firstTarSacc_relOnsetTime ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=allEyesNoErrors_outliersRemoved,
+               na.action=na.exclude)
+
+model13 <- lmer(firstTarSacc_relOnsetTime ~ Trial_Ctr*switchSet*Congruent*Blocktype*Block_Ctr + 
+                 (1|ID),
+               data=allEyesNoErrors_outliersRemoved,
+               na.action=na.exclude)
+
+
+```
+
+```{r table 9, echo=FALSE, message=FALSE}
+
+sjt.lmer(model12, model13, pred.labels=c('Block'), show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+
+In the first model, which included Trial, Set Type, Congruence, and Block Type, the only effect to approach significance was an interaction between Trial and Block Type: On Perseveration-Inhibition blocks, participants were faster to saccade to the target at the beginning of a set, and became slower towards the end. On Pure Updating blocks, the opposite effect was observed - participants were slower to saccade to the target at the beginning of a set, but became faster at the end of the set.
+
+```{r figure10.5, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Trial_Ctr:Blocktype', model12)
+x1 <- as.data.frame(eff1)
+#x1$Block_Ctr <- x1$Block_Ctr + 3.5
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=Blocktype, color=Blocktype))+
+  geom_line(aes(x=Trial_Ctr, y=fit, color=Blocktype)) +
+  #facet_grid(.~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='Time of first saccade to target')
+p
+```
+
+
+When Block was added into the model as an index of time on task there were some effects that reached or approached significance:
+
+- marginal main effect of trial: Later trials in a block had faster onset times for saccades to the target.
+
+- marginal interaction between Trial and Blocktype: This is the same as the effect observed for the model that did not include Block.
+
+```{r figure11, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Trial_Ctr:Blocktype', model13)
+x1 <- as.data.frame(eff1)
+#x1$Block_Ctr <- x1$Block_Ctr + 3.5
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=Blocktype, color=Blocktype))+
+  geom_line(aes(x=Trial_Ctr, y=fit, color=Blocktype)) +
+  #facet_grid(.~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='Time of first saccade to target')
+p
+```
+
+- significant interactions between Trial, Switch Set, and Block, between Trial, Block Type and Block, as well as a 4-way interaction between Trial, Switch Set, Block Type, and Block: On Perseveration-Inhibition blocks at the beginning of the experiment, the "switch cost" of saccade onset is largest at the beginning of a set and becomes smaller; however by the end of the experiment, the "switch cost" starts off small and becomes larger over the course of the set. On the other hand, on Pure Updating blocks at the beginning of the experiment, the "switch cost" of saccade onset is largest at the end of a set, but by the end of the experiment it is largest at the beginning of the set. 
+
+```{r figure12, echo=FALSE, message=FALSE}
+
+eff1 <- effect('Trial_Ctr:switchSet:Blocktype:Block_Ctr', model13)
+x1 <- as.data.frame(eff1)
+x1$Block_Ctr <- x1$Block_Ctr + 3.5
+x1$Trial_Ctr <- x1$Trial_Ctr+2.5
+
+p=ggplot(x1, aes(x=Trial_Ctr, y=fit, shape=switchSet, color=switchSet))+
+  geom_line(aes(x=Trial_Ctr, y=fit, color=switchSet)) +
+  facet_grid(Blocktype~Block_Ctr) +
+  #scale_linetype_discrete(name='Switch Set', labels=c('Non-Switch','Switch')) +
+  labs(x='Trial', y='Time of first saccade to target')
+p
+```
+
+### Probability of first fixating Target 
+Does the likelihood of fixating the target prior to other items vary across conditions? (all trials, including errrors)
+```{r models 14-15, include=FALSE}
+
+allEyes_targetFirst <- allEyesClean
+allEyes_targetFirst[is.na(allEyes_targetFirst)] <- 9999999
+allEyes_targetFirst$firstTarFix_tar[(allEyes_targetFirst$firstTarFix_tar==0)|(allEyes_targetFirst$firstTarFix_tar==1 &
+                        allEyes_targetFirst$firstTarFix_sttime>allEyes_targetFirst$firstDistFix_sttime & 
+                          allEyes_targetFirst$firstTarFix_sttime>allEyes_targetFirst$firstNeutFix_sttime)] <- 0
+
+allEyes_targetFirst$switchSet <- factor(allEyes_targetFirst$switchSet,
+                            levels=c(0,1),
+                            labels=c('Non-Switch Set','Switch Set'))
+
+allEyes_targetFirst$Congruent <- factor(allEyes_targetFirst$Congruent,
+                            levels=c(1,2),
+                            labels=c('Congruent','Incongruent'))
+
+allEyes_targetFirst$Blocktype <- factor(allEyes_targetFirst$Blocktype,
+                            levels=c(3,4),
+                            labels=c('Pure Updating','Perseveration-Inhibition'))
+allEyes_targetFirst$ID <- factor(allEyes_targetFirst$ID)
+
+
+tarProb <- group_by(allEyes_targetFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(targetProb=mean(firstTarFix_tar, na.rm=TRUE))
+
+# winsorize
+meanTarProb <- mean(tarProb$targetProb, na.rm=TRUE)
+sdTarProb <- sd(tarProb$targetProb, na.rm=TRUE)
+maxTarProb <- meanTarProb + 3*sdTarProb
+minTarProb <- meanTarProb - 3*sdTarProb
+findNextLargestTarProb <- filter(tarProb, targetProb<maxTarProb)
+maxValueTarProb <- max(findNextLargestTarProb$targetProb)
+findNextSmallestTarProb <- filter(tarProb, targetProb>minTarProb)
+minValueTarProb <- min(findNextSmallestTarProb$targetProb)
+tarProb$targetProb[tarProb$targetProb>maxTarProb] <- maxValueTarProb
+tarProb$targetProb[tarProb$targetProb<minTarProb] <- minValueTarProb
+
+model14 <- lmer(targetProb ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=tarProb,
+               na.action=na.exclude)
+
+
+tarProbBlock <- group_by(allEyes_targetFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype, Block_Ctr) %>%
+  summarise(targetProb=mean(firstTarFix_tar, na.rm=TRUE))
+
+# winsorize
+meantarProbBlock <- mean(tarProbBlock$targetProb, na.rm=TRUE)
+sdtarProbBlock <- sd(tarProbBlock$targetProb, na.rm=TRUE)
+maxtarProbBlock <- meantarProbBlock + 3*sdtarProbBlock
+mintarProbBlock <- meantarProbBlock - 3*sdtarProbBlock
+findNextLargesttarProbBlock <- filter(tarProbBlock, targetProb<maxtarProbBlock)
+maxValuetarProbBlock <- max(findNextLargesttarProbBlock$targetProb)
+findNextSmallesttarProbBlock <- filter(tarProbBlock, targetProb>mintarProbBlock)
+minValuetarProbBlock <- min(findNextSmallesttarProbBlock$targetProb)
+tarProbBlock$targetProb[tarProbBlock$targetProb>maxtarProbBlock] <- maxValuetarProbBlock
+tarProbBlock$targetProb[tarProbBlock$targetProb<mintarProbBlock] <- minValuetarProbBlock
+
+model15 <- lmer(targetProb ~ Trial_Ctr*switchSet*Congruent*Blocktype*Block_Ctr + 
+                 (1|ID),
+               data=tarProbBlock,
+               na.action=na.exclude)
+
+x <- residuals(model15)
+p <- hist(x)
+
+```
+
+```{r table 10, echo=FALSE, message=FALSE}
+
+sjt.lmer(model14, model15, show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+
+Note that the model that included Block violated an assumption of the LMM - the residuals were not normally distributed 
+`p`
+
+Regardless, the effects of task condition on the likelihood of fixating the target first were consistent across the two models:
+
+- There was a significant interaction between Switch Set and Block Type: On Perseveration-Inhibition blocks, the probability of first fixating the target is reduced on Switch Sets compared to Non-Switch Sets. On Pure Updating blocks, there was no difference in target fixation likelihood between Switch and Non-Switch sets.
+
+```{r figure 13, echo=FALSE, message=FALSE}
+
+eff1 <- effect('switchSet:Blocktype', model14)
+x1 <- as.data.frame(eff1)
+
+limits = aes(ymax = fit + (se), ymin=fit - (se))
+dodge = position_dodge(width=0.9)
+
+s=ggplot(x1, aes(x = Blocktype, y = fit, fill = switchSet))+
+  geom_bar(stat='identity', position=dodge)+
+  geom_errorbar(limits, position=dodge, width=0.25)+
+  scale_fill_manual(values=c('orangered3','dodgerblue4'),
+                    name="Set Type",
+                    breaks=c("Non-Switch Set", "Switch Set"),
+                    labels=c("Non-Switch Set", "Switch Set")) +
+  ylab('Probability of fixating the target first')+
+  xlab('Block Type') +
+  coord_cartesian(ylim = c(.75,1)) 
+s
+
+```
+
+### Probability of fixating Distractor
+
+```{r models 16-17, include=FALSE}
+
+allEyes_distractorFirst <- allEyesClean
+allEyes_distractorFirst[is.na(allEyes_distractorFirst)] <- 9999999
+allEyes_distractorFirst$firstDistFix_dist[(allEyes_distractorFirst$firstDistFix_dist==0)|(allEyes_distractorFirst$firstDistFix_dist==1 &
+                        allEyes_distractorFirst$firstDistFix_sttime>allEyes_distractorFirst$firstTarFix_sttime & 
+                          allEyes_distractorFirst$firstDistFix_sttime>allEyes_distractorFirst$firstNeutFix_sttime)] <- 0
+
+allEyes_distractorFirst$switchSet <- factor(allEyes_distractorFirst$switchSet,
+                            levels=c(0,1),
+                            labels=c('Non-Switch Set','Switch Set'))
+
+allEyes_distractorFirst$Congruent <- factor(allEyes_distractorFirst$Congruent,
+                            levels=c(1,2),
+                            labels=c('Congruent','Incongruent'))
+
+allEyes_distractorFirst$Blocktype <- factor(allEyes_distractorFirst$Blocktype,
+                            levels=c(3,4),
+                            labels=c('Pure Updating','Perseveration-Inhibition'))
+allEyes_distractorFirst$ID <- factor(allEyes_distractorFirst$ID)
+
+
+distProb <- group_by(allEyes_distractorFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(distractorProb=mean(firstDistFix_dist, na.rm=TRUE))
+
+# winsorize
+meandistProb <- mean(distProb$distractorProb, na.rm=TRUE)
+sddistProb <- sd(distProb$distractorProb, na.rm=TRUE)
+maxdistProb <- meandistProb + 3*sddistProb
+mindistProb <- meandistProb - 3*sddistProb
+findNextLargestdistProb <- filter(distProb, distractorProb<maxdistProb)
+maxValuedistProb <- max(findNextLargestdistProb$distractorProb)
+findNextSmallestdistProb <- filter(distProb, distractorProb>mindistProb)
+minValuedistProb <- min(findNextSmallestdistProb$distractorProb)
+distProb$distractorProb[distProb$distractorProb>maxdistProb] <- maxValuedistProb
+distProb$distractorProb[distProb$distractorProb<mindistProb] <- minValuedistProb
+
+model16 <- lmer(distractorProb ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=distProb,
+               na.action=na.exclude)
+
+
+distProbBlock <- group_by(allEyes_distractorFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype, Block_Ctr) %>%
+  summarise(distractorProb=mean(firstDistFix_dist, na.rm=TRUE))
+
+# winsorize
+meandistProbBlock <- mean(distProbBlock$distractorProb, na.rm=TRUE)
+sddistProbBlock <- sd(distProbBlock$distractorProb, na.rm=TRUE)
+maxdistProbBlock <- meandistProbBlock + 3*sddistProbBlock
+mindistProbBlock <- meandistProbBlock - 3*sddistProbBlock
+findNextLargestdistProbBlock <- filter(distProbBlock, distractorProb<maxdistProbBlock)
+maxValuedistProbBlock <- max(findNextLargestdistProbBlock$distractorProb)
+findNextSmallestdistProbBlock <- filter(distProbBlock, distractorProb>mindistProbBlock)
+minValuedistProbBlock <- min(findNextSmallestdistProbBlock$distractorProb)
+distProbBlock$distractorProb[distProbBlock$distractorProb>maxdistProbBlock] <- maxValuedistProbBlock
+distProbBlock$distractorProb[distProbBlock$distractorProb<mindistProbBlock] <- minValuedistProbBlock
+
+model17 <- lmer(distractorProb ~ Trial_Ctr*switchSet*Congruent*Blocktype*Block_Ctr + 
+                 (1|ID),
+               data=distProbBlock,
+               na.action=na.exclude)
+
+x <- residuals(model17)
+p <- hist(x)
+
+```
+
+```{r table 11, echo=FALSE, message=FALSE}
+
+sjt.lmer(model16, model17, show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+
+Again, here, the model that included Block did not have normally-distributed residuals:
+`p`
+
+However, the two models had relatively similar effects:
+
+- Main effect of Set Type: participants were more likely to fixate on the distractor first on Switch Sets.
+- Main effect of Block Type: Participants were more likely to fixate on the distractor during Perseveration-Inhibition blocks.
+- Marginal main effect of Congruence: Participants were more likely to fixate on the distractor first on Incongruent trials.
+
+- Interaction between Set Type and Block Type: In general, participants were more likely to fixate on the distractor first on Switch Sets vs. Non-Switch sets, and this effect was most pronounced for Perseveration-Inhibition blocks. 
+
+```{r figure 14, echo=FALSE, message=FALSE}
+
+eff1 <- effect('switchSet:Blocktype', model16)
+x1 <- as.data.frame(eff1)
+
+limits = aes(ymax = fit + (se), ymin=fit - (se))
+dodge = position_dodge(width=0.9)
+
+s=ggplot(x1, aes(x = Blocktype, y = fit, fill = switchSet))+
+  geom_bar(stat='identity', position=dodge)+
+  geom_errorbar(limits, position=dodge, width=0.25)+
+  scale_fill_manual(values=c('orangered3','dodgerblue4'),
+                    name="Set Type",
+                    breaks=c("Non-Switch Set", "Switch Set"),
+                    labels=c("Non-Switch Set", "Switch Set")) +
+  ylab('Probability of fixating the distractor first')+
+  xlab('Block Type')
+
+s
+```
+
+### Probability of fixating Neutral Item
+```{r models 18-19, include=FALSE}
+
+allEyes_neutralFirst <- allEyesClean
+allEyes_neutralFirst[is.na(allEyes_neutralFirst)] <- 9999999
+allEyes_neutralFirst$firstNeutFix_neut[(allEyes_neutralFirst$firstNeutFix_neut==0)|(allEyes_neutralFirst$firstNeutFix_neut==1 &
+                        allEyes_neutralFirst$firstNeutFix_sttime>allEyes_neutralFirst$firstTarFix_sttime & 
+                          allEyes_neutralFirst$firstNeutFix_sttime>allEyes_neutralFirst$firstDistFix_sttime)] <- 0
+
+allEyes_neutralFirst$switchSet <- factor(allEyes_neutralFirst$switchSet,
+                            levels=c(0,1),
+                            labels=c('Non-Switch Set','Switch Set'))
+
+allEyes_neutralFirst$Congruent <- factor(allEyes_neutralFirst$Congruent,
+                            levels=c(1,2),
+                            labels=c('Congruent','Incongruent'))
+
+allEyes_neutralFirst$Blocktype <- factor(allEyes_neutralFirst$Blocktype,
+                            levels=c(3,4),
+                            labels=c('Pure Updating','Perseveration-Inhibition'))
+allEyes_neutralFirst$ID <- factor(allEyes_neutralFirst$ID)
+
+
+neutProb <- group_by(allEyes_neutralFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype) %>%
+  summarise(neutralProb=mean(firstNeutFix_neut, na.rm=TRUE))
+
+# winsorize
+meanneutProb <- mean(neutProb$neutralProb, na.rm=TRUE)
+sdneutProb <- sd(neutProb$neutralProb, na.rm=TRUE)
+maxneutProb <- meanneutProb + 3*sdneutProb
+minneutProb <- meanneutProb - 3*sdneutProb
+findNextLargestneutProb <- filter(neutProb, neutralProb<maxneutProb)
+maxValueneutProb <- max(findNextLargestneutProb$neutralProb)
+findNextSmallestneutProb <- filter(neutProb, neutralProb>minneutProb)
+minValueneutProb <- min(findNextSmallestneutProb$neutralProb)
+neutProb$neutralProb[neutProb$neutralProb>maxneutProb] <- maxValueneutProb
+neutProb$neutralProb[neutProb$neutralProb<minneutProb] <- minValueneutProb
+
+model18 <- lmer(neutralProb ~ Trial_Ctr*switchSet*Congruent*Blocktype + 
+                 (1|ID),
+               data=neutProb,
+               na.action=na.exclude)
+
+
+neutProbBlock <- group_by(allEyes_neutralFirst, ID, Trial_Ctr, switchSet, Congruent, Blocktype, Block_Ctr) %>%
+  summarise(neutralProb=mean(firstNeutFix_neut, na.rm=TRUE))
+
+# winsorize
+meanneutProbBlock <- mean(neutProbBlock$neutralProb, na.rm=TRUE)
+sdneutProbBlock <- sd(neutProbBlock$neutralProb, na.rm=TRUE)
+maxneutProbBlock <- meanneutProbBlock + 3*sdneutProbBlock
+minneutProbBlock <- meanneutProbBlock - 3*sdneutProbBlock
+findNextLargestneutProbBlock <- filter(neutProbBlock, neutralProb<maxneutProbBlock)
+maxValueneutProbBlock <- max(findNextLargestneutProbBlock$neutralProb)
+findNextSmallestneutProbBlock <- filter(neutProbBlock, neutralProb>minneutProbBlock)
+minValueneutProbBlock <- min(findNextSmallestneutProbBlock$neutralProb)
+neutProbBlock$neutralProb[neutProbBlock$neutralProb>maxneutProbBlock] <- maxValueneutProbBlock
+neutProbBlock$neutralProb[neutProbBlock$neutralProb<minneutProbBlock] <- minValueneutProbBlock
+
+model19 <- lmer(neutralProb ~ Trial_Ctr*switchSet*Congruent*Blocktype*Block_Ctr + 
+                 (1|ID),
+               data=neutProbBlock,
+               na.action=na.exclude)
+
+x <- residuals(model17)
+p <- hist(x)
+
+```
+
+```{r table 12, echo=FALSE, message=FALSE}
+
+sjt.lmer(model18, model19, show.se = TRUE, show.ci = FALSE, show.fstat = TRUE, digits.est=3, digits.std=3)
+
+```
+
+There were no significant effects of task on the probability of fixating the neutral object in the model that did not include Block. The model including Block had non-normal residuals, and so will not be interpreted further.
+`p`
+
+Overall, fixation on the neutral object first was a relatively low-probability event (5% of trials).
+
+## How do eyetracking measures predict performance?
+
+### Saccade Velocity
+
+### Saccade Time
+
